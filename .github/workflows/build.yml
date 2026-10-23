@@ -64,10 +64,10 @@ jobs:
         run: |
           ver="${GITHUB_REF_NAME#v}"
           gh release create "$GITHUB_REF_NAME" \
-            m5_friday_voice.bin \
-            m5stack-core2-factory-16MB.bin \
-            bootloader/bootloader.bin \
-            partition_table/partition-table.bin \
+            build/m5_friday_voice.bin \
+            build/m5stack-core2-factory-16MB.bin \
+            build/bootloader/bootloader.bin \
+            build/partition_table/partition-table.bin \
             partitions.csv \
             --title "v$ver" \
             --notes "M5Stack Core2 v1.1 · Friday 语音终端固件 v$ver
