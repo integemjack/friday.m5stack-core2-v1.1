@@ -274,7 +274,7 @@ static bool ensure_voice_online(void)
   g_dial_backoff_ms = 2000;   // 连上了：退避归零（否则断几次之后每次要等 30 秒）
   bool voice_ok;
   app_lock(); voice_ok = g_app.voice_available; app_unlock();
-  if (voice_ok) app_set_status("对着它说话吧");
+  if (voice_ok) app_set_status("按住 A 键说话，松开结束；B 键发送");
   else app_set_status("已连上，但这台 Friday 的语音不可用");
   ESP_LOGI(TAG, "LIVE（voice=%d）", voice_ok);
   return true;
@@ -294,22 +294,59 @@ static void ui_pump(void)
 static void ui_hold(bool down)
 {
   ESP_LOGI(TAG, "hold %s", down ? "DOWN" : "UP");
-  audio_hold(down);   // 半双工：按下开麦（扬声器让出 GPIO0），松开关
-  work_set_held(down);
+  audio_hold(down);      // 半双工：按下开麦（扬声器让出 GPIO0），松开关
+  work_voice_held(down); // 按下：held=true；松开不发 held=false——草稿留在服务端，等 B/C 处置
   app_lock(); g_app.held = down; app_unlock();
 }
 
-// 串口测试命令（hold/interrupt）没有入口：UART0 被 console 占着，自动测试改为摄像头看屏 + 电脑发声
-static void ui_interrupt(void) { work_tap_interrupt(); }
+// 键 B：发送草稿（发给助手=交给它语音回答；发给会话=runner.submit）
+static void ui_send(void)
+{
+  app_stage_t st; bool held;
+  char draft[512];
+  app_lock(); st = g_app.stage; held = g_app.held; strlcpy(draft, g_app.caption, sizeof(draft)); app_unlock();
+  if (st != APP_LIVE) { app_set_status("还没连上 Friday"); return; }
+  if (held) { app_set_status("还在按着，松开再发"); return; }
+  if (!draft[0]) { app_set_status("先按住左键说点什么"); return; }
+  bool assist; char id[40];
+  ui_get_target(&assist, id, sizeof(id));
+  if (assist) {
+    work_voice_release();   // voice.held false：服务端定稿草稿 → 交给助手
+    app_set_status("已交给助手，等它回答");
+  } else {
+    work_send_text(id, draft);
+    work_voice_discard();   // 草稿发走了，服务端那份清掉
+    app_set_caption(NULL);
+    app_set_status("已发到会话：%s", ui_target_label());
+  }
+}
 
-static void ui_volume(int delta)
+// 点屏幕中间图标（原来的右键动作挪到这里）：有草稿=丢弃，没草稿=打断播报/思考
+static void ui_stop(void)
+{
+  char draft[512];
+  app_lock(); strlcpy(draft, g_app.caption, sizeof(draft)); app_unlock();
+  if (draft[0]) {
+    work_voice_discard();
+    app_set_caption(NULL);
+    app_set_status("已丢弃");
+  } else {
+    work_tap_interrupt();
+    app_set_status("已打断");
+  }
+}
+
+// 音量页：设置音量（0..255，M5 口径）
+static void ui_volume_set(int v)
 {
   extern void audio_set_volume(int);
-  extern int audio_volume(void);
-  int v = audio_volume() + delta;
-  if (v > 255) v = 255;
   audio_set_volume(v);
+  g_store.volume = v;
+  store_save_volume();
 }
+
+static void ui_sessions_open(void) { work_activity_sub(); }
+static void ui_sessions_close(void) { work_activity_unsub(); }
 
 // 点顶部状态栏：检查更新（有新版就下载安装重启）
 static void ui_update(void)
@@ -325,11 +362,16 @@ extern "C" void app_main(void)
   cfg.internal_spk = false;   // 喇叭由 audio_io 自己开 I2S1（M5Unified Speaker 块边界会顿挫）
   cfg.internal_mic = true;
   M5.begin(cfg);
+  M5.setTouchButtonHeight(40);   // ★ 启用 Core2 屏下沿三键映射（默认 0=不映射）：y≥200 原始区 = BtnA/B/C
   M5.Lcd.setBrightness(128);
   M5.Power.setExtOutput(false);   // 不对外供电，省电
 
   g_wifi_ev = xEventGroupCreate();
   store_init();
+  {
+    extern void audio_set_volume(int);
+    audio_set_volume(g_store.volume);   // 上次的音量（默认 200）
+  }
   ESP_ERROR_CHECK(esp_event_loop_create_default());
   ESP_ERROR_CHECK(esp_netif_init());
   esp_netif_create_default_wifi_sta();
@@ -338,8 +380,11 @@ extern "C" void app_main(void)
   ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL));
   ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi_event, NULL));
 
-  static ui_callbacks_t uicb = { .on_hold = ui_hold, .on_interrupt = ui_interrupt,
-                                 .on_volume = ui_volume, .on_update = ui_update };
+  static ui_callbacks_t uicb = { .on_hold = ui_hold, .on_send = ui_send,
+                                 .on_stop = ui_stop, .on_update = ui_update,
+                                 .on_volume_set = ui_volume_set,
+                                 .on_sessions_open = ui_sessions_open,
+                                 .on_sessions_close = ui_sessions_close };
   ui_set_callbacks(&uicb);
   ui_init();
   work_bind_ws();
@@ -355,6 +400,18 @@ extern "C" void app_main(void)
     app_set_stage(APP_WIFI_WAIT);
     wifi_ok = wifi_connect(15000);
   }
+
+#ifdef UI_DUMP
+  // 调试构建：WiFi 连上后把各页面渲染好，设备自己起个 HTTP 服务（:8098）让电脑来拉。
+  // 电脑端：node tools/ui-dump-fetch.mjs → node tools/ui-dump-decode.mjs → node tools/ui-dump-inspect.mjs
+  if (wifi_ok) {
+    ui_dump_serve();
+    for (;;) vTaskDelay(pdMS_TO_TICKS(5000));
+  }
+  ESP_LOGE(TAG, "UI_DUMP 构建需要 NVS 里已有的 WiFi 凭据（这次没连上 WiFi）");
+  for (;;) vTaskDelay(pdMS_TO_TICKS(5000));
+#endif
+
   if (!wifi_ok) {
     app_set_stage(APP_PORTAL);
     portal_run(10 * 60 * 1000);   // 10 分钟没人配就重启（重试）
@@ -395,7 +452,9 @@ extern "C" void app_main(void)
         while ((r = schat_poll_qr(token)) == QR_PENDING || r == QR_SCANNED || r == QR_ERROR) {
           if (r == QR_ERROR) vTaskDelay(pdMS_TO_TICKS(3000));
           else vTaskDelay(pdMS_TO_TICKS(interval));
-          if (xTaskGetTickCount() * portTICK_PERIOD_MS - start > 300000) r = QR_EXPIRED;
+          uint32_t used = xTaskGetTickCount() * portTICK_PERIOD_MS - start;
+          ui_qr_hint(r == QR_SCANNED, 300000 - used);
+          if (used > 300000) r = QR_EXPIRED;
           if (r == QR_EXPIRED) break;
         }
         if (r == QR_APPROVED) {

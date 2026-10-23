@@ -1,6 +1,10 @@
 # ESP-IDF 构建产物
 build/
+build-dump/
 sdkconfig.old
+
+# 界面自检的中间产物（脚本在 tools/ui-dump-*.mjs，渲染结果不入库）
+tools/ui-dump/
 
 # 编辑器 / 系统杂项
 .vscode/

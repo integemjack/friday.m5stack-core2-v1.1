@@ -54,8 +54,17 @@ void store_init(void)
   g_store.expires_at_ms = 0;
   rd_str("ssid", g_store.wifi_ssid, sizeof(g_store.wifi_ssid));
   rd_str("pass", g_store.wifi_pass, sizeof(g_store.wifi_pass));
+  {
+    int64_t v = 200;
+    rd_i64("vol", &v);
+    g_store.volume = (int)v;
+    if (g_store.volume < 0) g_store.volume = 0;
+    if (g_store.volume > 255) g_store.volume = 255;
+  }
   if (!g_store.device_id[0]) store_gen_device_id();
 }
+
+void store_save_volume(void) { wr_i64("vol", g_store.volume); }
 
 void store_gen_device_id(void)
 {

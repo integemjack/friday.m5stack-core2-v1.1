@@ -7,6 +7,7 @@
 #include "esp_peer.h"
 #include "esp_peer_default.h"
 #include "cJSON.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
@@ -37,6 +38,23 @@ static void peer_open_and_dial(void);   // peer_task 里调，定义在后面
 
 // feed 队列（audio 任务 → peer 任务）：预拼好的 JSON 字符串指针
 static QueueHandle_t g_feed_q;
+
+// 会话列表快照（activity.subscribe；UI 任务读、peer 任务写）
+static work_session_t g_sessions[24];
+static int g_sessions_n;
+static uint32_t g_sessions_ver;
+static SemaphoreHandle_t g_sess_mu;
+static bool g_assistant_ok;
+static int g_rid_activity = -1;      // activity.subscribe 的回执 id
+
+// 语音会话活着吗（v0.3：服务端答完一轮会自动 stop；再按 A 要先 voice.start）
+static bool g_voice_on;
+static int g_rid_voice_start = -1;
+
+static void sess_mu_init(void)
+{
+  if (!g_sess_mu) g_sess_mu = xSemaphoreCreateMutex();
+}
 
 // ---------------- JSON 小助手 ----------------
 
@@ -138,7 +156,7 @@ static void voice_state_apply(cJSON *d)
   if (!d) return;
   app_lock();
   cJSON *a = cJSON_GetObjectItem(d, "active");
-  if (a) g_app.voice_active = cJSON_IsTrue(a);
+  if (a) { g_app.voice_active = cJSON_IsTrue(a); g_voice_on = g_app.voice_active; }
   cJSON *av = cJSON_GetObjectItem(d, "available");
   if (av) g_app.voice_available = cJSON_IsTrue(av);
   const char *st = cJSON_GetStringValue(cJSON_GetObjectItem(d, "state"));
@@ -148,6 +166,7 @@ static void voice_state_apply(cJSON *d)
     else if (!strcmp(st, "thinking")) g_app.voice_state = VOICE_THINKING;
     else if (!strcmp(st, "speaking")) g_app.voice_state = VOICE_SPEAKING;
     else g_app.voice_state = VOICE_NONE;
+    if (!strcmp(st, "off")) g_voice_on = false;
   }
   const char *err = cJSON_GetStringValue(cJSON_GetObjectItem(d, "error"));
   if (err && err[0]) { strlcpy(g_app.status_text, err, sizeof(g_app.status_text)); }
@@ -199,7 +218,15 @@ static void handle_rpc_message(const char *json, size_t len)
   cJSON *params = cJSON_GetObjectItem(msg, "params");
   if (method) {
     // 事件
-    handle_voice_event(method, params);
+    if (!strcmp(method, "activity.assistant")) {
+      bool en = cJSON_IsTrue(cJSON_GetObjectItem(params, "enabled"));
+      if (g_sess_mu) { xSemaphoreTake(g_sess_mu, portMAX_DELAY); g_assistant_ok = en; g_sessions_ver++; xSemaphoreGive(g_sess_mu); }
+      ESP_LOGI(TAG, "assistant %s", en ? "on" : "off");
+    } else if (!strcmp(method, "activity")) {
+      // 增量动静：不解析（列表页只做快照），刷一下版本号让 UI 重拉也不至于
+    } else {
+      handle_voice_event(method, params);
+    }
     cJSON_Delete(msg);
     return;
   }
@@ -229,6 +256,36 @@ static void handle_rpc_message(const char *json, size_t len)
     cJSON_Delete(msg);
     return;
   }
+  if (rid == g_rid_activity && rid > 0 && result) {
+    // activity.subscribe 回执：{sessions:[SessionActivity], assistant}
+    if (g_sess_mu) {
+      xSemaphoreTake(g_sess_mu, portMAX_DELAY);
+      g_sessions_n = 0;
+      cJSON *arr = cJSON_GetObjectItem(result, "sessions");
+      cJSON *s;
+      cJSON_ArrayForEach(s, arr) {
+        if (g_sessions_n >= (int)(sizeof(g_sessions) / sizeof(g_sessions[0]))) break;
+        const char *id = cJSON_GetStringValue(cJSON_GetObjectItem(s, "id"));
+        const char *title = cJSON_GetStringValue(cJSON_GetObjectItem(s, "title"));
+        const char *status = cJSON_GetStringValue(cJSON_GetObjectItem(s, "status"));
+        if (!id || !id[0]) continue;
+        strlcpy(g_sessions[g_sessions_n].id, id, sizeof(g_sessions[0].id));
+        strlcpy(g_sessions[g_sessions_n].title, title ? title : "(无名会话)", sizeof(g_sessions[0].title));
+        strlcpy(g_sessions[g_sessions_n].status, status ? status : "idle", sizeof(g_sessions[0].status));
+        g_sessions_n++;
+      }
+      cJSON *as = cJSON_GetObjectItem(result, "assistant");
+      if (as) g_assistant_ok = cJSON_IsTrue(as);
+      g_sessions_ver++;
+      xSemaphoreGive(g_sess_mu);
+      ESP_LOGI(TAG, "activity 快照：%d 个会话，assistant=%d", g_sessions_n, (int)g_assistant_ok);
+    }
+    cJSON_Delete(msg);
+    return;
+  }
+  if (rid == g_rid_voice_start && rid > 0 && error) {
+    g_voice_on = false;   // start 被拒：下次按 A 重试
+  }
   if (rid == 1 && result) {
     // hello 回执：看 server.features 有没有 voice
     cJSON *server = cJSON_GetObjectItem(result, "server");
@@ -255,8 +312,9 @@ static void handle_rpc_message(const char *json, size_t len)
       char p[96];
       snprintf(p, sizeof(p), "{\"inputSampleRate\":%d,\"outputSampleRate\":%d}",
                VOICE_SAMPLE_RATE, VOICE_SAMPLE_RATE);
-      int vid = rpc_request("voice.start", p);
-      ESP_LOGI(TAG, "voice.start sent（声纹过滤已关）id=%d", vid);
+      g_rid_voice_start = rpc_request("voice.start", p);
+      g_voice_on = true;
+      ESP_LOGI(TAG, "voice.start sent（声纹过滤已关）id=%d", g_rid_voice_start);
     } else {
       app_set_status("这台 Friday 不支持语音（2.35+ 且本地语音可用才有）");
     }
@@ -618,22 +676,35 @@ static void on_ws_event(const char *event, const char *data, size_t len)
 
 // ---------------- 对外 ----------------
 
+// peer 任务要 24KB 内部栈。等到拨号时再建会撞上 WSS+TLS 把 DRAM 吃得只剩十几 KB 的时刻
+// （真机：24K/16K 都 create 失败 → WebRTC 永远起不来 → 30 秒被挂断）。
+// 所以开机早期（work_bind_ws，WiFi 还没 start）就把它建好，占住那 24KB。
+static void peer_task_ensure(void)
+{
+  if (g_peer_task_run) return;
+  if (!g_cmd_q) {
+    g_cmd_q = xQueueCreate(6, sizeof(peer_cmd_t));
+    g_feed_q = xQueueCreate(6, sizeof(char *));
+  }
+  g_peer_task_run = true;
+  BaseType_t ok = xTaskCreate(peer_task, "peer", 24 * 1024, NULL, 5, NULL);
+  if (ok != pdPASS) ok = xTaskCreate(peer_task, "peer", 16 * 1024, NULL, 5, NULL);
+  ESP_LOGW(TAG, "peer task create %s（内部堆余 %uB）", ok == pdPASS ? "ok" : "FAIL",
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+  if (ok != pdPASS) g_peer_task_run = false;
+}
+
 void work_start(int64_t bot_id)
 {
   if (!g_cmd_q) {
     g_cmd_q = xQueueCreate(6, sizeof(peer_cmd_t));
     g_feed_q = xQueueCreate(6, sizeof(char *));
+    sess_mu_init();
   }
-  // peer 任务在这里起（不能等 peer_open_and_dial：它自己就在这个任务里跑，鸡生蛋）
-  if (!g_peer_task_run) {
-    g_peer_task_run = true;
-    // 内部 DRAM 紧：32KB 创建失败过（真机），24KB 实测够 esp_peer_open，不够再降到 16KB
-    BaseType_t ok = xTaskCreate(peer_task, "peer", 24 * 1024, NULL, 5, NULL);
-    if (ok != pdPASS) ok = xTaskCreate(peer_task, "peer", 16 * 1024, NULL, 5, NULL);
-    ESP_LOGW(TAG, "peer task create %s", ok == pdPASS ? "ok" : "FAIL");
-    if (ok != pdPASS) g_peer_task_run = false;
-  }
+  // peer 任务已在 work_bind_ws（开机早期）建好；万一那次失败（RAM 紧）这里再兜底试一次
+  peer_task_ensure();
   work_reset();
+  ESP_LOGI(TAG, "dial：内部堆余 %uB", (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
   g_bot_id = bot_id;
   random_hex(g_request_id, 32);
   g_dialing = true;
@@ -675,11 +746,96 @@ void work_tap_interrupt(void)
   }
 }
 
-void work_set_held(bool held)
+// ---- v0.3 按键的语音语义（对齐桌面端 AssistantVoice：held 阻止自动交付，松开=草稿停在那）----
+
+static void voice_start_now(void)
+{
+  char p[96];
+  snprintf(p, sizeof(p), "{\"inputSampleRate\":%d,\"outputSampleRate\":%d}",
+           VOICE_SAMPLE_RATE, VOICE_SAMPLE_RATE);
+  g_rid_voice_start = rpc_request("voice.start", p);
+  g_voice_on = true;
+  ESP_LOGI(TAG, "voice.start（按 A 重开）id=%d", g_rid_voice_start);
+}
+
+void work_voice_held(bool held)
 {
   if (!g_dc_open) return;
-  if (held) rpc_notify("voice.held", "{\"held\":true}");
-  else rpc_notify("voice.held", "{\"held\":false}");
+  if (held) {
+    // 服务端答完一轮会自动 stop：没会话就先开一个再按住（不然按了也白按）
+    if (!g_voice_on) voice_start_now();
+    rpc_notify("voice.held", "{\"held\":true}");
+  }
+  // 松开不发 held=false：草稿留在服务端，等 B 发送 / C 丢弃
+}
+
+void work_voice_release(void)
+{
+  if (!g_dc_open) return;
+  rpc_notify("voice.held", "{\"held\":false}");   // 定稿草稿 → 交给助手
+}
+
+void work_voice_discard(void)
+{
+  if (!g_dc_open) return;
+  rpc_notify("voice.stop", "{}");
+  g_voice_on = false;
+}
+
+void work_send_text(const char *conv_id, const char *text)
+{
+  if (!g_dc_open || !conv_id || !conv_id[0] || !text || !text[0]) return;
+  char esc[1280];
+  json_escape(text, strlen(text), esc, sizeof(esc));
+  size_t cap = strlen(esc) + strlen(conv_id) + 128;
+  char *buf = (char *)malloc(cap);
+  if (!buf) return;
+  snprintf(buf, cap, "{\"conversationID\":\"%s\",\"text\":\"%s\"}", conv_id, esc);
+  int rid = rpc_request("runner.submit", buf);
+  free(buf);
+  ESP_LOGI(TAG, "runner.submit → 会话 %s（%d 字，id=%d）", conv_id, (int)strlen(esc), rid);
+}
+
+void work_activity_sub(void)
+{
+  if (!g_dc_open) return;
+  sess_mu_init();
+  g_rid_activity = rpc_request("activity.subscribe", "{}");
+  ESP_LOGI(TAG, "activity.subscribe id=%d", g_rid_activity);
+}
+
+void work_activity_unsub(void)
+{
+  if (!g_dc_open) return;
+  rpc_notify("activity.unsubscribe", "{}");
+}
+
+int work_sessions_copy(work_session_t *out, int cap)
+{
+  if (!g_sess_mu || !out || cap <= 0) return 0;
+  xSemaphoreTake(g_sess_mu, portMAX_DELAY);
+  int n = g_sessions_n < cap ? g_sessions_n : cap;
+  memcpy(out, g_sessions, (size_t)n * sizeof(work_session_t));
+  xSemaphoreGive(g_sess_mu);
+  return n;
+}
+
+uint32_t work_sessions_version(void)
+{
+  if (!g_sess_mu) return 0;
+  xSemaphoreTake(g_sess_mu, portMAX_DELAY);
+  uint32_t v = g_sessions_ver;
+  xSemaphoreGive(g_sess_mu);
+  return v;
+}
+
+bool work_assistant_enabled(void)
+{
+  if (!g_sess_mu) return false;
+  xSemaphoreTake(g_sess_mu, portMAX_DELAY);
+  bool ok = g_assistant_ok;
+  xSemaphoreGive(g_sess_mu);
+  return ok;
 }
 
 bool work_dc_open(void) { return g_dc_open; }
@@ -687,5 +843,34 @@ const char *work_request_id(void) { return g_request_id; }
 
 void work_bind_ws(void)
 {
+  sess_mu_init();
+  peer_task_ensure();   // 开机就把 peer 任务建好（见上面注释：等拨号时建会因 DRAM 紧而失败）
   schat_ws_on_event(on_ws_event);
 }
+
+#ifdef UI_DUMP
+// 调试构建专用：填几个假会话，好把会话列表页的版式渲染出来看
+extern "C" void work_dump_seed_sessions(void)
+{
+  static const char *titles[] = {
+    "重构 Friday Work 的登录流程",
+    "帮我看看这个 ESP32 的 I2S 时钟为什么和麦克风冲突",
+    "写一份 v0.3 的发布说明",
+    "翻译这篇论文",
+    "这个标题特别特别长用来验证截断到底截在哪里看看能不能看清",
+  };
+  static const char *sts[] = { "running", "approval", "question", "idle", "error" };
+  sess_mu_init();
+  xSemaphoreTake(g_sess_mu, portMAX_DELAY);
+  g_sessions_n = 0;
+  for (int i = 0; i < 5; i++) {
+    snprintf(g_sessions[i].id, sizeof(g_sessions[i].id), "conv-%d", 1000 + i);
+    strlcpy(g_sessions[i].title, titles[i], sizeof(g_sessions[i].title));
+    strlcpy(g_sessions[i].status, sts[i], sizeof(g_sessions[i].status));
+    g_sessions_n++;
+  }
+  g_assistant_ok = true;
+  g_sessions_ver++;
+  xSemaphoreGive(g_sess_mu);
+}
+#endif

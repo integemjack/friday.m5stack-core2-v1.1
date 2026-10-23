@@ -8,7 +8,7 @@
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
 
-#define APP_VERSION "0.2.0"
+#define APP_VERSION "0.3.0"
 #define PROTOCOL_VERSION 1  // REMOTE.md §4
 
 // ---- 默认值 ----

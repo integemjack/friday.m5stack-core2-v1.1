@@ -1,4 +1,5 @@
 #include "portal.h"
+#include "ui.h"
 #include "store.h"
 #include "app.h"
 #include "esp_wifi.h"
@@ -138,6 +139,11 @@ bool portal_run(uint32_t timeout_ms)
   uint32_t start = xTaskGetTickCount() * portTICK_PERIOD_MS;
   while (!g_got && xTaskGetTickCount() * portTICK_PERIOD_MS - start < timeout_ms) {
     vTaskDelay(pdMS_TO_TICKS(200));
+    // 屏上同步显示配网页（连上来几台、还剩多久）
+    wifi_sta_list_t sta;
+    int clients = 0;
+    if (esp_wifi_ap_get_sta_list(&sta) == ESP_OK) clients = sta.num;
+    ui_portal(clients, timeout_ms - (xTaskGetTickCount() * portTICK_PERIOD_MS - start));
   }
   if (server) httpd_stop(server);
   esp_wifi_stop();

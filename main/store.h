@@ -15,6 +15,7 @@ typedef struct {
   int64_t expires_at_ms;   // 当前 token 的死线（本机开机相对毫秒；跨重启无效，不读回）
   char wifi_ssid[33];
   char wifi_pass[65];
+  int volume;              // 喇叭音量 0..255（音量页改）
 } store_t;
 
 extern store_t g_store;
@@ -24,6 +25,7 @@ void store_save_wifi(void);
 void store_save_server(void);
 void store_save_auth(void);       // token/refresh/userId/expires/bot
 void store_save_bot(void);
+void store_save_volume(void);       // 音量
 void store_clear_bot(void);         // 忘掉选中的机器人（换机器人连）
 void store_clear_auth(void);      // 登出：清 token 相关
 void store_gen_device_id(void);   // 没有时生成

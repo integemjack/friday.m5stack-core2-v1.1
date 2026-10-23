@@ -26,3 +26,9 @@ idf_component_register(
     M5GFX
     esp_driver_i2s
 )
+
+# 调试构建：设了环境变量 UI_DUMP 就把 ui.cpp 的绘制目标换成内存画布，
+# 开机把各页面 RLE 吐到串口（见 tools/ui-dump-decode.mjs）；正常构建不受影响。
+if(DEFINED ENV{UI_DUMP})
+  target_compile_options(${COMPONENT_LIB} PRIVATE -DUI_DUMP)
+endif()

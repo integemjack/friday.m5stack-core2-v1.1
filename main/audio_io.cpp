@@ -148,6 +148,29 @@ static int16_t g_mic_buf[2][VOICE_FEED_SAMPLES];
 static volatile bool g_spk_writing;
 static int g_volume = 200, g_duck_volume = 80;
 static uint32_t g_last_play_ms;
+static volatile int g_mic_level, g_play_level;   // 0..255，UI 图标用
+
+// 峰值平滑：涨得快（看得清起音），落得慢（不至于抖成一片）
+static void level_update(volatile int *lvl, int peak)
+{
+  int v = *lvl;
+  if (peak > v) v = v + (peak - v) * 3 / 4;
+  else v = v - (v - peak) / 5 - 1;
+  if (v < 0) v = 0;
+  if (v > 255) v = 255;
+  *lvl = v;
+}
+
+static int pcm_peak(const int16_t *pcm, size_t n)
+{
+  int32_t pk = 0;
+  for (size_t i = 0; i < n; i++) {
+    int32_t a = pcm[i];
+    if (a < 0) a = -a;
+    if (a > pk) pk = a;
+  }
+  return (int)(pk >> 7);   // 0..32767 → 0..255 量级
+}
 static SemaphoreHandle_t g_switch_mu = NULL;
 
 static uint32_t now_ms_(void) { return xTaskGetTickCount() * portTICK_PERIOD_MS; }
@@ -221,7 +244,25 @@ static void feed_task(void *arg)
 
   while (g_running) {
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(5));
-    if (g_paused || ring_len() == 0) continue;
+    if (g_paused) {
+      // 暂停：功放也顺手关掉（节能）
+      if (g_spk_on) {
+        xSemaphoreTake(g_switch_mu, portMAX_DELAY);
+        spk_off_locked();
+        xSemaphoreGive(g_switch_mu);
+      }
+      continue;
+    }
+    if (ring_len() == 0) {
+      level_update(&g_play_level, 0);
+      // 播完 700ms 静默就关功放（节能；留 700ms 是等下一句 TTS，别句间开关咔哒响）
+      if (g_spk_on && !g_spk_writing && now_ms_() - g_last_play_ms > 700) {
+        xSemaphoreTake(g_switch_mu, portMAX_DELAY);
+        spk_off_locked();
+        xSemaphoreGive(g_switch_mu);
+      }
+      continue;
+    }
     if (!g_spk_on) {
       xSemaphoreTake(g_switch_mu, portMAX_DELAY);
       if (!g_mic_on) spk_on_locked();
@@ -230,6 +271,7 @@ static void feed_task(void *arg)
     }
     size_t n = ring_peek(src, SPK_CHUNK);
     if (!n) continue;
+    level_update(&g_play_level, pcm_peak(src, n));
 
     // 16k → 48k 线性插值 + 音量，再复制到左右声道
     int vol = g_duck ? g_duck_volume : g_volume;
@@ -300,6 +342,8 @@ void audio_set_volume(int v01)
 }
 
 int audio_volume(void) { return g_volume; }
+int audio_mic_level(void) { return g_mic_level; }
+int audio_play_level(void) { return g_play_level; }
 
 void audio_duck(bool on) { g_duck = on; }
 
@@ -334,10 +378,11 @@ static void mic_task(void *arg)
   int slot = 0, skip = 4;   // 麦刚上电第一帧会削顶（爆音），跳过前几拍
   while (g_running) {
     vTaskDelayUntil(&wake, pdMS_TO_TICKS(100));
-    if (!g_hold || g_paused || !g_mic_on) { skip = 4; continue; }
+    if (!g_hold || g_paused || !g_mic_on) { level_update(&g_mic_level, 0); skip = 4; continue; }
     if (!M5.Mic.isEnabled()) continue;
     if (skip > 0) { skip--; continue; }
     if (!M5.Mic.record(g_mic_buf[slot], VOICE_FEED_SAMPLES, VOICE_SAMPLE_RATE)) continue;
+    level_update(&g_mic_level, pcm_peak(g_mic_buf[slot], VOICE_FEED_SAMPLES));
     work_feed_audio(g_mic_buf[slot], VOICE_FEED_SAMPLES);
     slot ^= 1;
   }
@@ -359,8 +404,9 @@ void audio_start(void)
   ring_clear();
   M5.Mic.end();
   g_mic_on = false;
+  // v0.3 节能：不预先开功放——收到 voice.audio（audio_play）才开，播完 700ms 静默自动关
   xSemaphoreTake(g_switch_mu, portMAX_DELAY);
-  spk_on_locked();      // 初始只要喇叭（等 TTS）；麦克风等按住再开
+  if (g_spk_on) spk_off_locked();
   xSemaphoreGive(g_switch_mu);
   xTaskCreatePinnedToCore(mic_task, "mic", 4096, NULL, 4, NULL, 1);
   xTaskCreatePinnedToCore(feed_task, "ttsfeed", 4096, NULL, 6, NULL, 1);

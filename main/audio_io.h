@@ -20,5 +20,9 @@ bool audio_playing(void);
 void audio_set_volume(int v01);  // 0..255（M5 口径）
 int  audio_volume(void);
 
+// 电平（0..255，快起慢落的平滑峰值）：UI 的动态图标用它随真实声音起伏
+int audio_mic_level(void);       // 按住说话时的输入电平（没在录=往 0 落）
+int audio_play_level(void);      // 正在播的 TTS 电平（没在播=往 0 落）
+
 // 按住说话：down=true 开麦克风（半双工：扬声器让出 GPIO0），false 关
 void audio_hold(bool down);

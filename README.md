@@ -20,9 +20,12 @@ M5Stack Core2 v1.1 (esp32, 16MB flash / 8MB PSRAM)
 │    └─ JSON-RPC：hello{protocol:1,client:"m5core2"} → voice.start → voice.feed(PCM16 b64)
 │                                                    ↑ 事件：voice.state/audio(PCM16 b64)
 ├─ 麦克风：PDM (I2S0, M5Unified Mic) 16kHz 单声道，100ms 帧 → base64 → voice.feed
-├─ 扬声器：I2S1 16kHz，voice.audio 帧 → playRaw（队列满丢帧，绝不积压延迟）
+├─ 扬声器：I2S1 16kHz，voice.audio 帧 → 环形缓冲 → 48k 上采样（队列满丢帧，绝不积压延迟）
 │    半双工：Speaker 在播时暂停录音（Core2 麦克/喇叭共享 GPIO0，无回声消除）
-└─ 屏幕：二维码登录页 / 状态栏（阶段·电量·RSSI）/ 字幕（实时听写）/ [按住说话][停][音量]
+│    ★ 节能：功放（ALDO3）收到语音才开，播完静默 700ms 自动关
+└─ 屏幕（v0.3）：状态栏（阶段·电量·RSSI）/ Friday 动态图标（液体彩虹圆环，随语音状态和真实电平变）
+     / 字幕气泡·草稿·发送目标 / 屏下机身三键提示（不是按钮，只是印着告诉你 A/B/C 干什么）
+     / 右滑音量页 / 左滑会话列表页（选发送目标）/ 点图标=丢草稿或打断
 ```
 
 对应服务端实现：Friday `qt/src/core/remote/`（RemoteWorkSession=被叫、RemoteVoice=语音会话、
@@ -34,9 +37,31 @@ WorkFramer=分片），协议文档 `qt/docs/REMOTE.md` §2 WebRTC 工作通道�
 1. 烧录后屏幕出现 SoftAP 配网页提示：手机连 `Friday-Voice`（密码 `12345678`），
    打开 `http://192.168.4.1`，填 WiFi 和（可选）chatserver 地址，保存自动重启。
 2. 屏幕出现二维码 → 用 Secret-Chat App 扫码并在手机上批准。
-3. 自动拨号 Friday 机器人 → 屏幕显示「就绪」→ **按住下方长条说话，松开等回答**。
-   - 「停」= voice.interrupt（打断 TTS 和思考）
-   - 「音N」= 音量（点击 +1，共 8 档）
+3. 自动拨号 Friday 机器人 → 屏幕中央出现彩色圆环动画 → 按下面对应操作。
+
+## 操作（v0.3）
+
+用机身下面的三个原生按键（横屏下沿从左到右）：
+
+| 键 | 作用 |
+|----|------|
+| 左 A | **按住说话，松开结束**（草稿先留在服务端，屏幕变青色字幕；侧页里照常能用） |
+| 中 B | **发送**：发给当前目标（默认助手，语音回答）；发给会话则用 runner.submit 投递文字 |
+| 右 C | **弃用**，按了不响应（机身键带里画成灰的） |
+
+原来的「取消」挪到**点屏幕中间的 Friday 图标**：有草稿=丢弃（voice.stop），没草稿=打断播报/思考。
+
+- **右滑**（主屏）：音量页，拖动音量条或点 ＋/－ 调，自动存到 NVS。
+- **左滑**（主屏）：会话列表页（activity.subscribe），顶部固定「助手」且默认选中，
+  点某个会话即成为发送目标，返回后按 B 把草稿发过去；列表可上下拖动，20 秒不动自动回主屏。
+- 助手答完一轮会自动关语音会话；再按 A 会自动重新 voice.start，不用管。
+- 点顶部状态栏 = 检查/安装 OTA 更新。
+- 侧页返回：往回滑、点左上「返回」，或放着不管（音量页 12 秒、会话页 20 秒自动回主屏）。
+- 节能：平时功放是关的，**收到语音才开喇叭**，播完静默 700ms 自动关；主屏 1 分钟不碰亮度降到 24，
+  按键或触摸会亮回来。
+
+> 说明：松开 A 后草稿存在服务端（voice 的 pending），只有按 B 才交给助手/会话，点中间图标丢弃；
+> 连按两次说话会接着同一段草稿追加，和桌面端按住说话的语义一致。
 
 凭据/WiFi/选择过的 bot 都存 NVS，重启免扫码。
 
@@ -55,6 +80,23 @@ cmd /c "cd /d C:\Users\ultra\Desktop\works\esp-idf-v5.5 && call export.bat && cd
 ```
 
 烧录（设备插 USB 后）：同上把 `build` 换成 `-p COMx flash monitor`。
+
+## 界面自检（不用肉眼盯屏幕）
+
+改完界面后把绘制目标换成 PSRAM 画布，让设备把每个页面渲染成位图吐给电脑看版式：
+
+```powershell
+# 1. 调试构建（环境变量 UI_DUMP=1 时 main/CMakeLists.txt 会给 ui.cpp 加 -DUI_DUMP）
+cmd /c "cd /d C:\Users\ultra\Desktop\works\esp-idf-v5.5 && call export.bat >nul && cd /d C:\Users\ultra\Desktop\works\m5stack-core2-v1.1 && set UI_DUMP=1&& idf.py -B build-dump build"
+# 2. 烧进去（只烧 app 分区 0x100000），设备连上 NVS 里的 WiFi 后在 :8098 起服务
+# 3. 拉回电脑还原成 PNG，再看每页的元素占位
+node tools/ui-dump-fetch.mjs          # 不给 IP 会扫 192.168.20.0/24；也可 $env:UI_DUMP_IP=...
+node tools/ui-dump-decode.mjs        # → tools/ui-dump/pages/*.png
+node tools/ui-dump-inspect.mjs       # → tools/ui-dump/inspect.txt（每块墨迹的 y/x 占位，查重叠/贴边/触边）
+```
+
+调试构建不跑状态机、不拨号，只渲染 ui.cpp 里 `ui_dump_all()` 列的那几页（主屏各状态、音量、会话、
+扫码、配网、选 bot），数据是 4 位游程 + 4 位 RGB565 的 RLE 文本。正常构建里这部分全被 `#ifdef` 编译掉。
 
 ## CI 构建与发布（GitHub Actions）
 
@@ -96,6 +138,8 @@ push 到 `main` 自动构建（`espressif/idf:v5.5.0`），产物上传 artifact
   建议戴 3.5mm 耳机可解锁「边放边听」（Mic 那时不会拾到外放）。
 - 一个 Friday 同时只允许一路语音（服务端语义）：桌面端语音模式和它互斥，后开的接管。
 - `sdkconfig.defaults` 关了 WiFi 驱动 IRAM 优化（省 5KB IRAM，ESP32 IRAM 紧张）。
+- 机身键 C 已弃用（按了不响应）；它的两个动作分别挤到「点中间图标」和「反滑/自动返回」上。
+  侧页里 A/B 照常能用（说话/发送），因为它们是全局动作。
 
 ## 文件
 
@@ -105,7 +149,7 @@ main/
 ├─ schat.cpp/.h   chatserver HTTP（扫码/轮询/refresh/friends）+ WS 客户端（信封、ack、事件分发）
 ├─ work.cpp/.h    p2p 信令状态机 + esp_peer 封装 + WorkFramer + JSON-RPC + voice.* 事件处理
 ├─ audio_io.cpp   Mic/Speaker 半双工管道（乒乓采样、播放队列丢帧策略）
-├─ ui.cpp/.h      屏幕（二维码、状态栏、字幕、按钮）+ 触摸
+├─ ui.cpp/.h      屏幕（主屏动态图标/字幕/目标、音量页、会话页、扫码页、配网页）+ 机身键与触摸手势
 ├─ portal.cpp/.h  SoftAP 配网（HTTP 表单）
 ├─ ota.cpp/.h     固件自更新（GitHub Releases，双分区切换）
 ├─ store.cpp/.h   NVS 持久化
