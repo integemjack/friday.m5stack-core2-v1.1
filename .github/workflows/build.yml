@@ -22,8 +22,8 @@ jobs:
       - name: Merge factory image (16MB 全量镜像)
         run: |
           . $IDF_PATH/export.sh
-          python -m esptool --chip esp32 merge-bin \
-            --flash-mode dio --flash-freq 80m --flash-size 16MB \
+          python -m esptool --chip esp32 merge_bin \
+            --flash_mode dio --flash_freq 80m --flash_size 16MB \
             -o build/m5stack-core2-factory-16MB.bin \
             0x0 build/bootloader/bootloader.bin \
             0x8000 build/partition_table/partition-table.bin \
