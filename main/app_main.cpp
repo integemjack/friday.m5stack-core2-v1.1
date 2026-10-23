@@ -307,7 +307,7 @@ static void ui_send(void)
   app_lock(); st = g_app.stage; held = g_app.held; strlcpy(draft, g_app.caption, sizeof(draft)); app_unlock();
   if (st != APP_LIVE) { app_set_status("还没连上 Friday"); return; }
   if (held) { app_set_status("还在按着，松开再发"); return; }
-  if (!draft[0]) { app_set_status("先按住左键说点什么"); return; }
+  if (!draft[0]) { app_set_status("先按住 A 键说点什么"); return; }
   bool assist; char id[40];
   ui_get_target(&assist, id, sizeof(id));
   if (assist) {

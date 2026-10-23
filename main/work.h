@@ -18,7 +18,7 @@ void work_reset(void);             // 仅清状态（WS 断时用）
 void work_tap_interrupt(void);     // 「停」→ voice.interrupt（打断播报/生成）
 void work_voice_held(bool held);   // 键 A：true=按住（必要时自动 voice.start），false=松开（草稿留在服务端）
 void work_voice_release(void);     // 键 B（发给助手）：voice.held false → 服务端定稿草稿交给助手
-void work_voice_discard(void);     // 键 C（取消）/ 发给会话后清草稿：voice.stop
+void work_voice_discard(void);     // 点中间图标丢草稿 / 发给会话后清草稿：voice.stop
 
 // 发文字到某个会话（runner.submit；conv_id 来自会话列表）
 void work_send_text(const char *conv_id, const char *text);
