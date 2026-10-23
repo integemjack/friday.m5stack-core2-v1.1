@@ -1,0 +1,9 @@
+## 组件全在项目 components/ 下（components.espressif.com 在本机不可达，用了本地拷贝）：
+##   esp_peer / libsrtp / esp_websocket_client / M5GFX / M5Unified
+## 可联网环境想改回注册表的话：删 components/ 下对应目录，恢复下面的依赖声明
+## dependencies:
+##   espressif/esp_peer: "^1.5.7"
+##   m5stack/m5unified: "^0.2.27"
+##   espressif/esp_websocket_client: "^1.4.0"
+dependencies:
+  idf: ">=5.3"

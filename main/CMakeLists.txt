@@ -1,0 +1,26 @@
+idf_component_register(
+  SRCS
+    "app_main.cpp"
+    "util.cpp"
+    "store.cpp"
+    "schat.cpp"
+    "work.cpp"
+    "audio_io.cpp"
+    "ui.cpp"
+    "portal.cpp"
+  INCLUDE_DIRS "."
+  REQUIRES
+    nvs_flash
+    esp_wifi
+    esp_http_client
+    esp_websocket_client
+    esp_http_server
+    esp_timer
+    json
+    mbedtls
+    esp_peer
+    esp_libsrtp
+    M5Unified
+    M5GFX
+    esp_driver_i2s
+)
