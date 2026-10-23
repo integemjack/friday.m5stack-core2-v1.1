@@ -11,6 +11,7 @@
 #include "audio_io.h"
 #include "ui.h"
 #include "portal.h"
+#include "ota.h"
 #include "M5Unified.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -310,6 +311,12 @@ static void ui_volume(int delta)
   audio_set_volume(v);
 }
 
+// 点顶部状态栏：检查更新（有新版就下载安装重启）
+static void ui_update(void)
+{
+  if (!ota_check_now()) app_set_status("更新任务忙，稍等");
+}
+
 extern "C" void app_main(void)
 {
   auto cfg = M5.config();
@@ -331,7 +338,8 @@ extern "C" void app_main(void)
   ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, on_wifi_event, NULL));
   ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, on_wifi_event, NULL));
 
-  static ui_callbacks_t uicb = { .on_hold = ui_hold, .on_interrupt = ui_interrupt, .on_volume = ui_volume };
+  static ui_callbacks_t uicb = { .on_hold = ui_hold, .on_interrupt = ui_interrupt,
+                                 .on_volume = ui_volume, .on_update = ui_update };
   ui_set_callbacks(&uicb);
   ui_init();
   work_bind_ws();
@@ -354,6 +362,7 @@ extern "C" void app_main(void)
   }
   ui_init();
   app_set_status("WiFi 已连");
+  ota_init();   // 后台静默检查更新（开机 30s 后首查，每 6h 一次；手动入口在顶部状态栏）
   // 进入主阶段：没凭据去扫码，有凭据直接连
   if (g_store.token[0]) app_set_stage(APP_WS_CONNECT);
   else app_set_stage(APP_QR_PAIR);

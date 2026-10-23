@@ -172,7 +172,9 @@ static void touch_tick(void)
     if (g_cb.on_hold) g_cb.on_hold(false);
   }
   if (t.wasClicked()) {
-    if (t.x >= 200 && t.x < 260 && t.y >= y && t.y < y + h) {
+    if (t.y < 24 && t.y >= 0) {
+      if (g_cb.on_update) g_cb.on_update();   // 顶部状态栏：检查/安装更新
+    } else if (t.x >= 200 && t.x < 260 && t.y >= y && t.y < y + h) {
       if (g_cb.on_interrupt) g_cb.on_interrupt();
     } else if (t.x >= 260 && t.x < 320 && t.y >= y && t.y < y + h) {
       if (g_cb.on_volume) g_cb.on_volume(64);

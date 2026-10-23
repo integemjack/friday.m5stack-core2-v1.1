@@ -8,6 +8,7 @@ idf_component_register(
     "audio_io.cpp"
     "ui.cpp"
     "portal.cpp"
+    "ota.cpp"
   INCLUDE_DIRS "."
   REQUIRES
     nvs_flash
@@ -20,6 +21,7 @@ idf_component_register(
     mbedtls
     esp_peer
     esp_libsrtp
+    app_update
     M5Unified
     M5GFX
     esp_driver_i2s

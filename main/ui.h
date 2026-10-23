@@ -16,5 +16,6 @@ typedef struct {
   void (*on_hold)(bool down);      // 按住说话（长条区）
   void (*on_interrupt)(void);      // 「停」
   void (*on_volume)(int delta);    // 音量键
+  void (*on_update)(void);         // 点顶部状态栏：检查/安装 OTA 更新
 } ui_callbacks_t;
 void ui_set_callbacks(const ui_callbacks_t *cb);

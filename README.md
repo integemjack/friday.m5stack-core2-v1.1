@@ -1,5 +1,7 @@
 # M5Stack Core2 v1.1 · Friday 语音终端
 
+[![build](https://github.com/integemjack/friday.m5stack-core2-v1.1/actions/workflows/build.yml/badge.svg)](https://github.com/integemjack/friday.m5stack-core2-v1.1/actions/workflows/build.yml)
+
 把 M5Stack Core2 v1.1 变成 Friday 的实体语音对讲机：**按住说话 → Friday 听写、思考、用它自己的音色回答（TTS）**，全程与 Friday Work 桌面客户端走同一条通道（SChat WebRTC 工作通道），无需在电脑上装任何东西。
 
 ## 架构
@@ -54,6 +56,26 @@ cmd /c "cd /d C:\Users\ultra\Desktop\works\esp-idf-v5.5 && call export.bat && cd
 
 烧录（设备插 USB 后）：同上把 `build` 换成 `-p COMx flash monitor`。
 
+## CI 构建与发布（GitHub Actions）
+
+push 到 `main` 自动构建（`espressif/idf:v5.5.0`），产物上传 artifact；
+推 `vX.Y.Z` tag 时校验 tag 与 `main/app.h` 的 `APP_VERSION` 一致后自动发 Release，附：
+
+- `m5_friday_voice.bin` — app 分区镜像（OTA 用 / 单烧到 `0x100000`）
+- `m5stack-core2-factory-16MB.bin` — 16MB 全量出厂镜像（空白机 `esptool write_flash 0x0`）
+- `bootloader.bin` / `partition-table.bin` — 分开烧：`0x0` / `0x8000`
+
+## OTA 自更新
+
+分区表（v0.2.0 起）：`ota_0`/`ota_1` 各 3MB 双分区 + `otadata`，从 factory 布局升级需重烧分区表。
+
+- 自动：开机 30s 后静默查一次，之后每 6h 一次；发现新版只提示（状态栏），不自动装。
+- 手动：**点屏幕顶部状态栏** → 检查 → 有新版则下载写入备用分区 → 自动重启切换（启动镜像校验不过自动回滚另一分区）。
+- 来源：GitHub Releases `latest` 的 `m5_friday_voice.bin`，HTTPS 真证书校验（区别于 chatserver 的自签跳过）。
+- 设备需能直连 `api.github.com` / `release-assets.githubusercontent.com`；连不上时手动检查会提示失败，不影响其他功能。
+
+版本号单一来源：`main/app.h` 的 `APP_VERSION`（构建时注入 esp_app_desc，Release tag 必须与它一致）。
+
 ## 组件来源（components.espressif.com 在本机不可达，全部本地化）
 
 `components/` 下（拷贝自 `C:\Users\ultra\Desktop\works\` 的 *-ref 克隆，可联网环境可换回注册表，见 main/idf_component.yml 注释）：
@@ -85,6 +107,7 @@ main/
 ├─ audio_io.cpp   Mic/Speaker 半双工管道（乒乓采样、播放队列丢帧策略）
 ├─ ui.cpp/.h      屏幕（二维码、状态栏、字幕、按钮）+ 触摸
 ├─ portal.cpp/.h  SoftAP 配网（HTTP 表单）
+├─ ota.cpp/.h     固件自更新（GitHub Releases，双分区切换）
 ├─ store.cpp/.h   NVS 持久化
 └─ util.cpp/.h    base64 / 随机 hex / 时间
 ```
