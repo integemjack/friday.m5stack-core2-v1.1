@@ -37,6 +37,11 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_LWIP_SO_RCVBUF=16384
 # 内部 DRAM 紧：静态 RX 缓冲 16→8（动态缓冲走 PSRAM，语音流量够用；省 ~13KB 内部堆）
 CONFIG_ESP32_WIFI_STATIC_RX_BUFFER_NUM=8
+# 静态 TX 缓冲 16→6（每块 ~1.6KB，esp_wifi_start 时分配、永久占内部 RAM）：
+# WebRTC 起来后内部堆被吃到 <512B，按住说话时 PDM 麦的 I2S DMA 描述符一块都分不到
+# （i2s_alloc_dma_desc failed → 一帧录不到 → 听写永远没文字）。本机流量 <100KB/s，
+# 6 静态 + 32 动态（PSRAM）绰绰有余；省 ~16KB 内部堆。
+CONFIG_ESP_WIFI_STATIC_TX_BUFFER_NUM=6
 
 # IRAM 紧张：关 WiFi 驱动的 IRAM 常驻优化（省 ~5KB，不用 light sleep 无影响）
 CONFIG_ESP_WIFI_IRAM_OPT=n

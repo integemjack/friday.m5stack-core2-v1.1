@@ -49,7 +49,7 @@ static bool spk_hw_start(void)
   if (g_tx) return true;
   i2s_chan_config_t cc = I2S_CHANNEL_DEFAULT_CONFIG(SPK_PORT, I2S_ROLE_MASTER);
   cc.dma_desc_num = 8;
-  cc.dma_frame_num = 512;        // 8×512 帧 ≈ 85ms @48k
+  cc.dma_frame_num = 256;        // 8×256 帧 ≈ 43ms @48k（512 帧要 ~16KB DMA 内存，太肥，挤麦）
   cc.auto_clear = true;
   esp_err_t err = i2s_new_channel(&cc, &g_tx, NULL);
   if (err != ESP_OK) { ESP_LOGE(TAG, "i2s_new_channel: %s", esp_err_to_name(err)); g_tx = NULL; return false; }
@@ -229,7 +229,10 @@ static void mic_on_locked(void)
   }
   M5.Mic.begin();
   g_mic_on = M5.Mic.isEnabled();
-  ESP_LOGI(TAG, "mic on = %d", g_mic_on);
+  // begin 每次要 ~5KB 内部 RAM（采集任务栈 2.5K + DMA 2.4K；end() 会删任务全还回去）。
+  // 「说话识别不出文字」十有八九是这里 begin 失败（内部堆被 WiFi/WebRTC 吃光）——留个数好排查。
+  ESP_LOGI(TAG, "mic on = %d（内部堆余 %uB）", g_mic_on,
+           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
 // ---------------- 播放：环形缓冲 → 48k 上采样 → I2S 阻塞写 ----------------
@@ -362,6 +365,7 @@ void audio_hold(bool down)
     audio_clear();            // 按下说话：把还没播完的 TTS 丢掉（打断）
     mic_on_locked();
     xSemaphoreGive(g_switch_mu);
+    if (!g_mic_on) app_set_status("麦克风没起来（内存不足），松开再按");   // 别让人对着哑麦干说
   } else {
     xSemaphoreTake(g_switch_mu, portMAX_DELAY);
     mic_off_locked();

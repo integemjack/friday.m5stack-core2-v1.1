@@ -50,6 +50,9 @@ static int g_rid_activity = -1;      // activity.subscribe 的回执 id
 // 语音会话活着吗（v0.3：服务端答完一轮会自动 stop；再按 A 要先 voice.start）
 static bool g_voice_on;
 static int g_rid_voice_start = -1;
+static int g_rid_hello = -1;   // ★ hello 回执匹配用 id，不能用固定 1：重拨后 id 递增，
+                               //   写死 1 会让重拨后永远不再 voice.start（真机踩过：
+                               //   通道 160s 空闲被服务端挂断→重拨→喂音全部发进没开的会话）
 
 static void sess_mu_init(void)
 {
@@ -242,7 +245,7 @@ static void handle_rpc_message(const char *json, size_t len)
     app_set_status("Friday：%s", m ? m : "出错了");
     ESP_LOGW(TAG, "RPC id=%d 出错：code=%d msg=%s", rid,
              (ec && cJSON_IsNumber(ec)) ? (int)ec->valuedouble : 0, m ? m : "");
-    if (rid == 1 || (ec && cJSON_IsNumber(ec) && (int)ec->valuedouble == 4)) {
+    if ((rid == g_rid_hello && rid > 0) || (ec && cJSON_IsNumber(ec) && (int)ec->valuedouble == 4)) {
       // hello / voice.start 失败：显示原因（助手没开 / 没装本地语音）
       app_set_status("voice 不可用：%s", m ? m : "");
     }
@@ -286,7 +289,7 @@ static void handle_rpc_message(const char *json, size_t len)
   if (rid == g_rid_voice_start && rid > 0 && error) {
     g_voice_on = false;   // start 被拒：下次按 A 重试
   }
-  if (rid == 1 && result) {
+  if (rid == g_rid_hello && rid > 0 && result) {
     // hello 回执：看 server.features 有没有 voice
     cJSON *server = cJSON_GetObjectItem(result, "server");
     const char *host = NULL, *ver = NULL;
@@ -357,7 +360,7 @@ static int peer_on_state(esp_peer_state_t state, void *ctx)
           "{\"protocol\":%d,\"client\":{\"name\":\"Friday Device\",\"version\":\"%s\","
           "\"platform\":\"esp32\",\"kind\":\"device\"},\"features\":[]}",
           PROTOCOL_VERSION, APP_VERSION);
-        rpc_request("hello", hello);
+        g_rid_hello = rpc_request("hello", hello);
       }
       break;
     case ESP_PEER_STATE_CONNECT_FAILED:
@@ -732,6 +735,9 @@ void work_reset(void)
   g_accepted = false;
   g_request_id[0] = '\0';
   g_dc_open = false;
+  g_voice_on = false;        // 语音会话随通道一起死：别让旧标志骗过 work_voice_held
+  g_rid_voice_start = -1;    // （按 A 时会自己补 voice.start）
+  g_rid_hello = -1;
   if (g_cmd_q) {
     peer_cmd_t c = { .cmd = PCMD_STOP };
     xQueueSend(g_cmd_q, &c, 0);
