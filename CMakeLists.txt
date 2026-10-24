@@ -8,5 +8,7 @@ if(NOT CMAKE_MATCH_1)
   message(FATAL_ERROR "main/app.h 里没解析到 APP_VERSION")
 endif()
 set(PROJECT_VER ${CMAKE_MATCH_1})
+# 改 app.h 后必须重新 configure 版本号才会刷新（否则 esp_app_desc 里是旧值）
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_LIST_DIR}/main/app.h")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(m5_friday_voice)
