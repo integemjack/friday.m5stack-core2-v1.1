@@ -8,6 +8,7 @@
 #include "work.h"
 
 void ui_init(void);
+int  ui_backlight(void);                // 当前背光：0=全黑息屏（用户不在） 24=暗 128=亮；OTA 错峰用
 void ui_draw(const char *qr_payload);   // qr_payload 非空时画配对二维码页（白底大码）
 void ui_qr_hint(bool scanned, int remain_ms);   // 二维码页底部那行（轮询里调，不动码）
 void ui_portal(int clients, uint32_t remain_ms);  // SoftAP 配网页（配网循环里调）

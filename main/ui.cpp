@@ -29,16 +29,34 @@
 
 static const char *UI_TAG = "ui";
 
-// 绘制目标：正常固件画到真屏；编译时加 -DUI_DUMP 就画到 PSRAM 画布，
-// 把每个页面渲染成 RLE 从串口吐出去，在电脑上还原成 PNG 看版式（正常固件不受影响）。
+// 绘制目标：正常固件画到全屏 PSRAM 帧缓冲（g_fb，屏幕的内存镜像），画完把那块区域一次性推上真屏
+// ——绘制先在内存里完成，屏幕上每个区域整块替换，杜绝「先清屏再逐笔画」的闪烁；
+// 编译时加 -DUI_DUMP 就画到 PSRAM 画布，把每个页面渲染成 RLE 从串口吐出去（正常固件不受影响）。
+// PSRAM 分不到帧缓冲时回退直写真屏（行为同旧版，仅拖页跟手动画禁用）。
+static m5gfx::LGFX_Sprite *g_fb;      // 320x240x2 帧缓冲（PSRAM）；nullptr = 回退直写（UI_DUMP 下恒 nullptr）
+static m5gfx::LGFXBase *g_dst;        // 绘制目标 = g_fb，或回退时 = 真屏
+static bool g_hold_flush;             // 拖页动画：画进帧缓冲但暂不上屏
 #ifdef UI_DUMP
 static m5gfx::LGFX_Sprite *g_canvas;
 static int g_dump_mic, g_dump_play;
 #define LCD (*g_canvas)
 #define UI_BRIGHT(x) ((void)0)
+#define ui_flush(...)  ((void)0)
+#define ui_flush_all() ((void)0)
 #else
-#define LCD (M5.Lcd)
+#define LCD (*g_dst)
 #define UI_BRIGHT(x) (M5.Lcd.setBrightness(x))
+static void ui_flush(int x, int y, int w, int h)   // 帧缓冲的一块推上真屏
+{
+  if (!g_fb || g_hold_flush || w <= 0 || h <= 0) return;
+  // ★ 不能裸 pushImage 传子矩形指针：它把源当「紧凑 w×h 块」（按行距 w 逐行取），
+  //   而帧缓冲真实行距是 320 —— 子矩形会被错位读成乱码。pushSprite 整体推送 +
+  //   clip 则按 sprite 真实行距逐行搬运，被 clip 限制只传这一块的数据。
+  M5.Lcd.setClipRect(x, y, w, h);
+  g_fb->pushSprite(&M5.Lcd, 0, 0);
+  M5.Lcd.clearClipRect();
+}
+static void ui_flush_all(void) { ui_flush(0, 0, 320, 240); }
 #endif
 
 static int ui_mic_level(void)
@@ -97,11 +115,10 @@ static int ui_play_level(void)
 #define BACK_Y0 3
 #define BACK_W 58
 #define BACK_H 17
-#define VOL_SL_X 24
-#define VOL_SL_W 272
-#define VOL_SL_Y 76
-#define VOL_SL_H 24
-#define VOL_BTN_CY 140
+#define VOLB_X 24      // 喇叭音量竖滑条（上=响下=轻，在条上上下拖）
+#define VOLB_W 40
+#define VOLB_Y 34
+#define VOLB_H 156     // 34..190
 #define SESS_Y0 26
 #define SESS_ROW_H 50                     // 行高翻倍：第一行名字，第二行状态/说明
 #define SESS_ROW_GAP 4
@@ -274,6 +291,7 @@ static void draw_top(void)
     uint16_t c = (i < bars) ? (bars >= 3 ? COL_GREEN : bars == 2 ? COL_YELLOW : COL_RED) : RGB565(46, 54, 74);
     LCD.fillRect(244 + i * 5, by + bh - hgt, 3, hgt, c);   // 244..262
   }
+  ui_flush(0, TOP_Y, 320, TOP_H);
 }
 
 static void draw_statusline(void)
@@ -281,13 +299,14 @@ static void draw_statusline(void)
   char local[96];
   app_lock(); strlcpy(local, g_app.status_text, sizeof(local)); app_unlock();
   LCD.fillRect(0, STATUS_Y, 320, STATUS_H, COL_BG);
-  if (!local[0]) return;
+  if (!local[0]) { ui_flush(0, STATUS_Y, 320, STATUS_H); return; }
   // 中文要用 efontCN_14（Font0 里没中文字模，以前这行一直是空的）；长了按像素截，不能按字节截
   clip_px(local, 306);
   LCD.setTextDatum(textdatum_t::middle_center);
   LCD.setFont(&fonts::efontCN_14);
   LCD.setTextColor(RGB565(150, 162, 186), COL_BG);
   LCD.drawString(local, 160, STATUS_Y + STATUS_H / 2);
+  ui_flush(0, STATUS_Y, 320, STATUS_H);
 }
 
 // ---------------- Friday 动态图标 ----------------
@@ -386,6 +405,7 @@ static void draw_orb(uint32_t now, st_t s)
     LCD.drawLine((int)cx, (int)cy, (int)(cx + len * cosf(a)), (int)(cy + len * sinf(a)),
                     orb_color(fmodf((float)i / ORB_SPOKES + cphase, 1.0f), dim));
   }
+  ui_flush(ORB_CX - 72, 44, 144, BUB_Y - 44);   // 只推图标区：帧缓冲里清区重画，屏幕整块替换，不闪
 }
 
 // ---------------- 字幕气泡 ----------------
@@ -427,6 +447,7 @@ static void draw_bubble(void)
     const char *tip = s.stage == APP_LIVE ? "按住 A 键说话，松开结束"
                       : (s.stage == APP_QR_PAIR ? "扫码登录后就能说话" : "正在连 Friday…");
     LCD.drawString(tip, BUB_X + BUB_W / 2, ty + (BUB_H - BUB_HEAD_H) / 2);
+    ui_flush(BUB_X, BUB_Y, BUB_W, BUB_H);
     return;
   }
   // 只显示尾部两行：先按字节取尾巴（对齐 UTF-8 边界），再按像素折行
@@ -469,6 +490,7 @@ static void draw_bubble(void)
   }
   if (s.held && (ui_ms() % 800) < 400)   // 按着说话：光标一闪一闪
     LCD.fillRect(lastx + 2, ty + 2 + (show - 1) * 17 + 3, 2, 11, COL_ORANGE);
+  ui_flush(BUB_X, BUB_Y, BUB_W, BUB_H);
 }
 
 // （底部键带已去掉：y≥200 仍是三键触摸区，但不再画任何提示，屏幕底部留纯背景）
@@ -482,6 +504,7 @@ static void page_main_full(void)
   draw_statusline();
   draw_orb(now, s);
   draw_bubble();
+  ui_flush_all();
 }
 
 // ---------------- 音量页 ----------------
@@ -507,9 +530,26 @@ static void draw_volume(void)
   LCD.setTextDatum(textdatum_t::middle_left);
   LCD.setTextColor(COL_TEXT, COL_BG);
   LCD.drawString("音量", 74, 12);
+  LCD.setTextDatum(textdatum_t::middle_right);
+  LCD.setTextColor(COL_DIM, COL_BG);
+  LCD.drawString("在条上上下拖", 316, 12);
 
-  // 喇叭图标 + 声波（按音量画 0~3 道）
-  int sx = 44, sy = 46;
+  // 左：竖滑条（上=响 下=轻）
+  int fh = VOLB_H * v / 255;
+  LCD.fillRoundRect(VOLB_X, VOLB_Y, VOLB_W, VOLB_H, 20, RGB565(28, 34, 50));
+  if (fh >= 40) LCD.fillRoundRect(VOLB_X, VOLB_Y + VOLB_H - fh, VOLB_W, fh, 20, COL_ACCENT);
+  else if (fh > 0) LCD.fillRoundRect(VOLB_X + VOLB_W / 2 - 3, VOLB_Y + VOLB_H - fh, 6, fh, 3, COL_ACCENT);
+  LCD.drawRoundRect(VOLB_X, VOLB_Y, VOLB_W, VOLB_H, 20, COL_BORDER);
+  for (int i = 1; i < 4; i++)
+    LCD.drawFastHLine(VOLB_X + VOLB_W + 4, VOLB_Y + VOLB_H * i / 4, 4, RGB565(60, 70, 92));
+  int ky = VOLB_Y + VOLB_H - fh;
+  if (ky < VOLB_Y + 18) ky = VOLB_Y + 18;
+  if (ky > VOLB_Y + VOLB_H - 18) ky = VOLB_Y + VOLB_H - 18;
+  LCD.fillCircle(VOLB_X + VOLB_W / 2, ky, 17, COL_TEXT);
+  LCD.fillCircle(VOLB_X + VOLB_W / 2, ky, 13, v == 0 ? COL_DIM : COL_ACCENT);
+
+  // 右上：喇叭图标 + 声波（按音量画 0~3 道）+ 大数字
+  int sx = 100, sy = 46;
   LCD.fillRect(sx, sy - 4, 6, 8, COL_TEXT);
   LCD.fillTriangle(sx + 6, sy - 4, sx + 6, sy + 4, sx + 14, sy + 9, COL_TEXT);
   LCD.fillTriangle(sx + 6, sy - 4, sx + 6, sy + 4, sx + 14, sy - 9, COL_TEXT);
@@ -518,67 +558,57 @@ static void draw_volume(void)
     int r = 5 + i * 5;
     LCD.drawCircle(sx + 16, sy, r, i + 1 == waves ? COL_ACCENT : RGB565(70, 90, 120));
   }
-  // 大数字（居中；以前靠右，和左边的喇叭图标之间一大块空白）
   char num[12];
   snprintf(num, sizeof(num), "%d%%", v * 100 / 255);
   LCD.setFont(&fonts::Font4);
   LCD.setTextDatum(textdatum_t::middle_center);
   LCD.setTextColor(v == 0 ? COL_DIM : COL_TEXT, COL_BG);
-  LCD.drawString(num, 160, 46);
+  LCD.drawString(num, 216, 46);
   if (v == 0) {
     LCD.setFont(&fonts::efontCN_14);
     LCD.setTextDatum(textdatum_t::middle_right);
     LCD.setTextColor(COL_RED, COL_BG);
-    LCD.drawString("静音", 300, 46);
+    LCD.drawString("静音", 316, 46);
   }
 
-  // 滑条
-  int fw = VOL_SL_W * v / 255;
-  LCD.fillRoundRect(VOL_SL_X, VOL_SL_Y, VOL_SL_W, VOL_SL_H, 12, RGB565(28, 34, 50));
-  if (fw >= 14) LCD.fillRoundRect(VOL_SL_X, VOL_SL_Y, fw, VOL_SL_H, 12, COL_ACCENT);
-  else if (fw > 0) LCD.fillRoundRect(VOL_SL_X, VOL_SL_Y + VOL_SL_H / 2 - 3, fw, 6, 3, COL_ACCENT);
-  LCD.drawRoundRect(VOL_SL_X, VOL_SL_Y, VOL_SL_W, VOL_SL_H, 12, COL_BORDER);
-  for (int i = 1; i < 4; i++)
-    LCD.drawFastVLine(VOL_SL_X + VOL_SL_W * i / 4, VOL_SL_Y + VOL_SL_H + 3, 3, RGB565(60, 70, 92));
-  int kx = VOL_SL_X + fw;
-  if (kx < VOL_SL_X + 10) kx = VOL_SL_X + 10;
-  if (kx > VOL_SL_X + VOL_SL_W - 10) kx = VOL_SL_X + VOL_SL_W - 10;
-  LCD.fillCircle(kx, VOL_SL_Y + VOL_SL_H / 2, 13, COL_TEXT);
-  LCD.fillCircle(kx, VOL_SL_Y + VOL_SL_H / 2, 10, v == 0 ? COL_DIM : COL_ACCENT);
+  // 右中：静音 / 最大 快捷
+  LCD.setFont(&fonts::efontCN_14);
+  LCD.setTextDatum(textdatum_t::middle_center);
+  LCD.fillRoundRect(137, 78, 56, 28, 6, v == 0 ? COL_RED : COL_CHIP);
+  LCD.drawRoundRect(137, 78, 56, 28, 6, v == 0 ? COL_RED : COL_BORDER);
+  LCD.setTextColor(v == 0 ? TFT_BLACK : COL_TEXT, v == 0 ? COL_RED : COL_CHIP);
+  LCD.drawString("静音", 165, 92);
+  LCD.fillRoundRect(213, 78, 56, 28, 6, v == 255 ? COL_GREEN : COL_CHIP);
+  LCD.drawRoundRect(213, 78, 56, 28, 6, COL_BORDER);
+  LCD.setTextColor(v == 255 ? TFT_BLACK : COL_TEXT, v == 255 ? COL_GREEN : COL_CHIP);
+  LCD.drawString("最大", 241, 92);
 
-  // － / ＋ 圆按钮 + 静音 / 最大 快捷
-  int cy = VOL_BTN_CY;
-  LCD.drawCircle(46, cy, 24, COL_BORDER);
-  LCD.drawCircle(274, cy, 24, COL_BORDER);
+  // 右下：－ / ＋ 圆按钮
+  LCD.drawCircle(165, 148, 24, COL_BORDER);
+  LCD.drawCircle(241, 148, 24, COL_BORDER);
   LCD.setFont(&fonts::Font4);
   LCD.setTextDatum(textdatum_t::middle_center);
   LCD.setTextColor(COL_TEXT, COL_BG);
-  LCD.drawString("-", 46, cy);
-  LCD.drawString("+", 274, cy);
-  LCD.setFont(&fonts::efontCN_14);
-  LCD.fillRoundRect(92, cy - 14, 56, 28, 6, v == 0 ? COL_RED : COL_CHIP);
-  LCD.drawRoundRect(92, cy - 14, 56, 28, 6, v == 0 ? COL_RED : COL_BORDER);
-  LCD.setTextColor(v == 0 ? TFT_BLACK : COL_TEXT, v == 0 ? COL_RED : COL_CHIP);
-  LCD.drawString("静音", 120, cy);
-  LCD.fillRoundRect(172, cy - 14, 56, 28, 6, v == 255 ? COL_GREEN : COL_CHIP);
-  LCD.setTextColor(v == 255 ? TFT_BLACK : COL_TEXT, v == 255 ? COL_GREEN : COL_CHIP);
-  LCD.drawString("最大", 200, cy);
+  LCD.drawString("-", 165, 148);
+  LCD.drawString("+", 241, 148);
 
-  // 实时播放电平（收到语音时它会跳，顺便证明喇叭真的开了）
-  LCD.fillRect(58, 176, VOL_SL_X + VOL_SL_W - 58 + 24, 8, RGB565(28, 34, 50));
+  // 底右：实时播放电平（收到语音时它会跳，顺便证明喇叭真的开了）
+  LCD.fillRect(130, 186, 176, 8, RGB565(28, 34, 50));
   int lv = ui_play_level();
-  if (lv > 0) LCD.fillRect(58, 176, (VOL_SL_X + VOL_SL_W - 34) * lv / 255, 8, COL_GREEN);
+  if (lv > 0) LCD.fillRect(130, 186, 176 * lv / 255, 8, COL_GREEN);
   LCD.setFont(&fonts::efontCN_14);
   LCD.setTextDatum(textdatum_t::middle_left);
   LCD.setTextColor(COL_DIM, COL_BG);
-  LCD.drawString("播放", VOL_SL_X, 180);
+  LCD.drawString("播放", 90, 190);
+  ui_flush_all();
 }
 
 static void draw_volume_level_only(void)   // 100ms 一次，只刷电平条那一小条
 {
   int lv = ui_play_level();
-  LCD.fillRect(VOL_SL_X + 26, 176, VOL_SL_W - 26, 8, RGB565(28, 34, 50));
-  if (lv > 0) LCD.fillRect(VOL_SL_X + 26, 176, (VOL_SL_W - 26) * lv / 255, 8, COL_GREEN);
+  LCD.fillRect(130, 186, 176, 8, RGB565(28, 34, 50));
+  if (lv > 0) LCD.fillRect(130, 186, 176 * lv / 255, 8, COL_GREEN);
+  ui_flush(130, 186, 176, 8);
 }
 
 // ---------------- 会话列表页 ----------------
@@ -689,6 +719,7 @@ static void draw_sessions(void)
     int ty = SESS_Y0 + 2 + (track_h - thumb) * g_sess_scroll / (content_h - view_h);
     LCD.fillRoundRect(314, ty, 4, thumb, 2, RGB565(70, 82, 108));
   }
+  ui_flush_all();
 }
 
 // ---------------- 页面切换 ----------------
@@ -755,6 +786,7 @@ void ui_draw(const char *qr_payload)
     LCD.drawRect((320 - qs) / 2 - 5, 33, qs + 10, qs + 10, RGB565(210, 210, 210));
     LCD.qrcode(qr_payload, (320 - qs) / 2, 38, qs, 4, true);
   }
+  ui_flush_all();
   ui_qr_hint(false, 300000);
 }
 
@@ -765,7 +797,7 @@ void ui_qr_hint(bool scanned, int remain_ms)
   LCD.setFont(&fonts::efontCN_14);
   LCD.setTextDatum(textdatum_t::middle_center);
   LCD.setTextColor(RGB565(16, 16, 16), TFT_WHITE);
-  if (scanned) { LCD.drawString("已扫码，等手机上批准…", 160, 224); return; }
+  if (scanned) { LCD.drawString("已扫码，等手机上批准…", 160, 224); ui_flush(0, 210, 320, 30); return; }
   char line[64];
   static const char dots[] = { '.', '.', '.', ' ' };
   static int di;
@@ -773,6 +805,7 @@ void ui_qr_hint(bool scanned, int remain_ms)
   char dd[5] = { dots[di], dots[(di + 1) & 3], dots[(di + 2) & 3], 0 };
   snprintf(line, sizeof(line), "用 Secret-Chat 扫码 %s 剩 %d 秒", dd, (remain_ms > 0 ? remain_ms : 0) / 1000);
   LCD.drawString(line, 160, 224);
+  ui_flush(0, 210, 320, 30);
 }
 
 // ---------------- 配网页（首次开机 SoftAP）----------------
@@ -791,6 +824,7 @@ void ui_portal(int clients, uint32_t remain_ms)
     LCD.setTextDatum(textdatum_t::middle_center);
     LCD.setTextColor(clients > 0 ? COL_GREEN : COL_DIM, COL_BG);
     LCD.drawString(line, 160, 168);
+    ui_flush(0, 158, 320, 20);
     return;
   }
   last_clients = clients;
@@ -841,6 +875,7 @@ void ui_portal(int clients, uint32_t remain_ms)
   LCD.setFont(&fonts::Font2);
   LCD.setTextColor(RGB565(70, 80, 100), COL_BG);
   LCD.drawString(APP_VERSION, 160, 222);
+  ui_flush_all();
 }
 
 // ---------------- bot 选择页 ----------------
@@ -901,6 +936,7 @@ void ui_pick_bot(char (*names)[48], int n)
   LCD.setTextDatum(textdatum_t::middle_center);
   LCD.setTextColor(RGB565(110, 122, 146), COL_BG);
   LCD.drawString("点一行连它（机身键在这页不管用）", 160, 218);
+  ui_flush_all();
 }
 
 int ui_pick_result(void) { return g_pick_n >= 0 ? g_pick_sel : -1; }
@@ -933,6 +969,7 @@ static void pick_touch(int x, int y)
   LCD.setTextDatum(textdatum_t::middle_right);
   LCD.drawString("已选", 306, ry + g_pick_bh / 2);
   (void)x;
+  ui_flush(6, ry, 308, g_pick_bh);
 }
 
 // ---------------- 触摸 / 手势 / 按键 ----------------
@@ -980,11 +1017,13 @@ static void handle_tap(int x, int y)
     return;
   }
   if (g_page == PG_VOLUME) {
-    if (y >= VOL_SL_Y - 18 && y <= VOL_SL_Y + VOL_SL_H + 18) { vol_set((x - VOL_SL_X) * 255 / VOL_SL_W); return; }
-    if (x < 80 && y > 110 && y < 172) { vol_set(audio_volume() - 24); return; }
-    if (x > 240 && y > 110 && y < 172) { vol_set(audio_volume() + 24); return; }
-    if (x >= 92 && x <= 148 && y >= VOL_BTN_CY - 14 && y <= VOL_BTN_CY + 14) { vol_set(0); return; }
-    if (x >= 172 && x <= 228 && y >= VOL_BTN_CY - 14 && y <= VOL_BTN_CY + 14) { vol_set(255); return; }
+    if (x >= VOLB_X - 14 && x <= VOLB_X + VOLB_W + 14 && y >= VOLB_Y - 6 && y <= VOLB_Y + VOLB_H + 6) {
+      vol_set((VOLB_Y + VOLB_H - y) * 255 / VOLB_H); return;   // 点竖条：跳到点的那格
+    }
+    if ((x - 165) * (x - 165) + (y - 148) * (y - 148) <= 900) { vol_set(audio_volume() - 24); return; }
+    if ((x - 241) * (x - 241) + (y - 148) * (y - 148) <= 900) { vol_set(audio_volume() + 24); return; }
+    if (x >= 137 && x <= 193 && y >= 78 && y <= 106) { vol_set(0); return; }
+    if (x >= 213 && x <= 269 && y >= 78 && y <= 106) { vol_set(255); return; }
     return;
   }
   if (y < SESS_Y0) return;
@@ -995,9 +1034,9 @@ static void handle_tap(int x, int y)
 
 // ---------------- 整页跟手横滑（[音量]·[主屏]·[会话] 排一条线，页面跟着手指走） ----------------
 
-static uint16_t *g_snap;   // 拖动起始页的整屏快照（PSRAM，320x240x2）
+static m5gfx::LGFX_Sprite *g_snapSpr;   // 拖动起始页整屏快照（PSRAM sprite，懒分配）
 static struct { bool active; int16_t dx; int8_t neighbor; uint32_t t0; } g_drag;
-static uint8_t g_axis;     // 一次触摸只认一种轴向：0 未定 1 横滑 2 竖滚 3 音量滑条
+static uint8_t g_axis;     // 一次触摸只认一种轴向：0 未定 1 横滑（切页） 2 竖滑（滚列表 / 音量页调音量）
 
 static int8_t drag_neighbor(int dx)   // 往这个方向拖，旁边是哪页（-1 = 到头了）
 {
@@ -1021,27 +1060,39 @@ static void drag_begin(int dx)
   g_drag.t0 = ui_ms();
   g_drag.neighbor = drag_neighbor(dx);
   if (g_drag.neighbor < 0) return;
-  if (!g_snap) g_snap = (uint16_t *)heap_caps_malloc(320 * 240 * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!g_snap) { g_drag.neighbor = -1; return; }
-  LCD.readRect(0, 0, 320, 240, g_snap);   // 当前页定格成快照，拖动期间整页跟手平移
-}
-
-static void drag_frame(int dx)   // 邻页铺满底，快照盖在上面平移 → 露出的边就是邻页
-{
+  if (!g_fb) { g_drag.neighbor = -1; return; }   // 回退直写模式：没有帧缓冲就没有跟手动画
+  if (!g_snapSpr) {
+    g_snapSpr = new m5gfx::LGFX_Sprite();
+    g_snapSpr->setColorDepth(m5gfx::color_depth_t::rgb565_2Byte);
+    g_snapSpr->setPsram(true);
+    if (!g_snapSpr->createSprite(320, 240)) { delete g_snapSpr; g_snapSpr = nullptr; }
+  }
+  if (!g_snapSpr) { g_drag.neighbor = -1; return; }
+  memcpy(g_snapSpr->getBuffer(), g_fb->getBuffer(), 320 * 240 * 2);   // 当前页定格成快照（PSRAM→PSRAM 毫秒级；旧版 readRect 从屏读要上百 ms，拖起手一顿）
+  g_hold_flush = true;   // 邻页画进帧缓冲但不上屏（屏幕继续显示当前页，拖动帧只做平移）
   if (g_drag.neighbor == PG_VOLUME) draw_volume();
   else if (g_drag.neighbor == PG_SESSIONS) draw_sessions();
   else page_main_full();
-  LCD.pushImage(dx, 0, 320, 240, g_snap);
+  g_hold_flush = false;
+}
+
+static void drag_frame(int dx)   // 两页像并排卡片整页平移：帧缓冲=邻页、快照=当前页，各 pushSprite 一次（自动裁剪，合计恰一屏数据量；屏幕上零重画零清屏 → 不闪）
+{
+  if (!g_fb || !g_snapSpr) return;
+  if (dx > 320) dx = 320;
+  if (dx < -320) dx = -320;
+  g_fb->pushSprite(&M5.Lcd, dx > 0 ? dx - 320 : dx + 320, 0);
+  g_snapSpr->pushSprite(&M5.Lcd, dx, 0);
 }
 
 static void drag_move(int dx)
 {
-  if (g_drag.neighbor < 0 || !g_snap) return;
+  if (g_drag.neighbor < 0 || !g_fb || !g_snapSpr) return;
   if (dx > 319) dx = 319;
   if (dx < -319) dx = -319;
   static uint32_t last;
   g_drag.dx = dx;
-  if (dx == 0 || ui_ms() - last < 40) return;   // 整页重画+整屏平移，25fps 跟手足够
+  if (dx == 0 || ui_ms() - last < 40) return;   // 每帧两次 pushSprite 合计一屏数据，25fps 跟手足够
   last = ui_ms();
   drag_frame(dx);
 }
@@ -1050,15 +1101,17 @@ static void drag_release(void)
 {
   if (!g_drag.active) return;
   g_drag.active = false;
-  if (g_drag.neighbor < 0 || !g_snap) return;
+  if (g_drag.neighbor < 0 || !g_fb || !g_snapSpr) return;
   bool commit = abs(g_drag.dx) > 96 || (abs(g_drag.dx) > 28 && ui_ms() - g_drag.t0 < 260);   // 拖过 1/3 屏，或快甩
-  if (commit) { open_page((page_t)g_drag.neighbor); return; }
+  int target = commit ? (g_drag.dx > 0 ? 320 : -320) : 0;   // 切页：滑到底；没拖够：弹回
   int dx = g_drag.dx;
-  while (dx) {   // 没拖够：整页弹回
-    dx = abs(dx) > 56 ? dx - (dx > 0 ? 56 : -56) : 0;
+  while (dx != target) {   // 同一套平移动画走完（切页和弹回都不再整页重画）
+    int rest = target - dx;
+    dx = abs(rest) <= 56 ? target : dx + (rest > 0 ? 56 : -56);
     drag_frame(dx);
     vTaskDelay(pdMS_TO_TICKS(16));
   }
+  if (commit) { open_page((page_t)g_drag.neighbor); return; }   // 帧缓冲已是邻页，重画+上屏内容相同不闪
   page_redraw();   // 恢复当前页（动画/字幕继续）
 }
 
@@ -1066,12 +1119,9 @@ static void handle_drag(int x, int y)
 {
   int dx = x - g_sw.sx, dy = y - g_sw.y;
   if (!g_axis) {
-    if (g_page == PG_VOLUME && y >= VOL_SL_Y - 22 && y <= VOL_SL_Y + VOL_SL_H + 22) g_axis = 3;
-    else if (abs(dx) > 10 || abs(dy) > 10) g_axis = (abs(dx) > abs(dy)) ? 1 : 2;
+    if (abs(dx) > 10 || abs(dy) > 10) g_axis = (abs(dx) > abs(dy)) ? 1 : 2;   // 轴向锁定：横滑切页，竖滑滚列表/调音量
   }
-  if (g_axis == 3) {
-    vol_set((x - VOL_SL_X) * 255 / VOL_SL_W);
-  } else if (g_axis == 1) {
+  if (g_axis == 1) {
     if (!g_drag.active) drag_begin(dx);
     drag_move(dx);
   } else if (g_axis == 2 && g_page == PG_SESSIONS) {
@@ -1079,6 +1129,11 @@ static void handle_drag(int x, int y)
     if (g_sess_scroll < 0) g_sess_scroll = 0;
     static uint32_t last_scroll_draw;
     if (ui_ms() - last_scroll_draw > 50) { last_scroll_draw = ui_ms(); draw_sessions(); }   // 拖动时限流重画
+  } else if (g_axis == 2 && g_page == PG_VOLUME) {
+    // 喇叭音量：只有从竖滑条上起手的竖滑才调（条外竖滑无效；横滑任何时候都留给切页）
+    if (g_sw.sx >= VOLB_X - 14 && g_sw.sx <= VOLB_X + VOLB_W + 14 &&
+        g_sw.sy >= VOLB_Y - 6  && g_sw.sy <= VOLB_Y + VOLB_H + 6)
+      vol_set((VOLB_Y + VOLB_H - y) * 255 / VOLB_H);   // 上=响下=轻，手指位置即音量
   }
   g_sw.x = x;
   g_sw.y = y;
@@ -1133,12 +1188,22 @@ static void buttons_tick(void)
 
 // ---------------- 对外 ----------------
 
+int ui_backlight(void) { return g_backlight; }
+
 void ui_init(void)
 {
 #ifdef UI_DUMP
   return;   // 调试构建：画布在 ui_dump_all() 里才建，这里不能碰 LCD
 #endif
-  LCD.setRotation(1);
+  M5.Lcd.setRotation(1);
+  if (!g_fb) {   // ui_init 可能被状态机多处调，帧缓冲只建一次
+    g_fb = new m5gfx::LGFX_Sprite();
+    g_fb->setColorDepth(m5gfx::color_depth_t::rgb565_2Byte);
+    g_fb->setPsram(true);
+    if (!g_fb->createSprite(320, 240)) { delete g_fb; g_fb = nullptr; }   // PSRAM 分不到：回退直写
+    g_dst = g_fb ? (m5gfx::LGFXBase *)g_fb : (m5gfx::LGFXBase *)&M5.Lcd;
+    ESP_LOGI(UI_TAG, "framebuffer=%s", g_fb ? "psram" : "direct");
+  }
   LCD.setTextWrap(false);
   g_page = PG_MAIN;
   g_qr_page = false;

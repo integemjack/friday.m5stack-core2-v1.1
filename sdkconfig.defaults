@@ -75,3 +75,11 @@ CONFIG_LOG_MAXIMUM_LEVEL_INFO=y
 # 稳一点：panic 重启；中断看门狗放宽到 500ms（WebRTC+TLS 峰值时 ISR 等待变长）
 CONFIG_ESP_INT_WDT_TIMEOUT_MS=500
 CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y
+
+# coredump to flash: next crash leaves a parseable snapshot in the coredump partition
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+
+# hardware MPI off: its esp_crypto lock release path (xQueueGiveFromISR assert, intermittent
+# full crash + reboot swallowing pending voice replies) is gone; software bignum costs ~hundreds ms
+# per handshake, imperceptible. AES/SHA hardware accel untouched.
+# CONFIG_MBEDTLS_HARDWARE_MPI is not set

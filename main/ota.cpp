@@ -8,6 +8,7 @@
 // 网络：设备需直连 api.github.com / release-assets.githubusercontent.com。
 #include "ota.h"
 #include "app.h"
+#include "ui.h"
 #include "cJSON.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
@@ -24,6 +25,8 @@ static const char *TAG = "ota";
 
 #define OTA_API_URL "https://api.github.com/repos/integemjack/friday.m5stack-core2-v1.1/releases/latest"
 #define OTA_ASSET_NAME "m5_friday_voice.bin"
+// ota 任务 0.3.1 栈是 12288：TLS1.3 握手+证书链 ECDSA 验签偶发 xQueueGiveFromISR assert 崩整机重启
+// （开机 30s 自动检查正好撞上用户发消息等回复的窗口，回复被重启吞掉）。20KB 栈+错峰双保险。
 #define OTA_CHECK_PERIOD_MS (6 * 3600 * 1000)
 #define EV_MANUAL BIT0
 
@@ -227,11 +230,20 @@ static void ota_task(void *arg)
                                         pdMS_TO_TICKS(first ? 30000 : OTA_CHECK_PERIOD_MS));
     first = false;
     bool manual = (b & EV_MANUAL) != 0;
+    // 错峰：自动检查等屏幕全黑（用户不在）再跑，避免 TLS 握手撞上语音会话；手动检查不等
+    if (!manual) {
+      for (int i = 0; i < 120 && ui_backlight() != 0; i++) {
+        b = xEventGroupWaitBits(s_ev, EV_MANUAL, pdTRUE, pdFALSE, pdMS_TO_TICKS(5000));
+        if (b & EV_MANUAL) { manual = true; break; }   // 等的过程中用户点了手动：立即跑
+      }
+      if (!manual) ESP_LOGI(TAG, "屏幕全黑，错峰跑自动检查");
+    }
     s_busy = true;
     char ver[24], url[512];
     if (!fetch_latest(ver, sizeof(ver), url, sizeof(url))) {
       if (manual) app_set_status("检查更新失败（GitHub 连不上？）");
     } else {
+      ESP_LOGI(TAG, "ota 栈余 %u B", (unsigned)uxTaskGetStackHighWaterMark(NULL));   // IDF 单位就是字节
       strlcpy(ota_latest_ver, (*ver == 'v' || *ver == 'V') ? ver + 1 : ver, sizeof(ota_latest_ver));
       if (!ota_ver_newer(ota_latest_ver, APP_VERSION)) {
         if (manual) app_set_status("固件 %s 已是最新", APP_VERSION);
@@ -256,7 +268,7 @@ static void ota_task(void *arg)
 void ota_init(void)
 {
   s_ev = xEventGroupCreate();
-  xTaskCreate(ota_task, "ota", 12288, NULL, 3, NULL);
+  xTaskCreate(ota_task, "ota", 20480, NULL, 3, NULL);   // TLS 验签吃栈，12KB 偏紧
 }
 
 bool ota_check_now(void)
